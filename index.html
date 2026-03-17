@@ -398,7 +398,7 @@ if(step===5) {
             <div style="width:100%; height:1px; background:#444; margin:5px 0;"></div>
             
             <input type="text" id="tI" placeholder="ID O NOMBRE..." value="${trayID}">
-            <button class="btn btn-main" onclick="trayID=document.getElementById('tI').value; if(trayID){qrScannerActive=false; setStep(6);}">ACEPTAR</button>
+            <button class="btn btn-main" onclick="trayID=document.getElementById('tI').value; if(trayID){qrScannerActive=false; updateVisualCache(); setStep(6);}">ACEPTAR</button>
         </div>
     `;
 }
