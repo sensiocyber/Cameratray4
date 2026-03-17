@@ -134,6 +134,16 @@ return { x: top.x + (bot.x - top.x) * tty, y: top.y + (bot.y - top.y) * tty };
 
 function draw() {
 ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+if (appState >= 3) {
+        renderFinal();
+        // El bucle se detiene aquí. No hay requestAnimationFrame.
+        // Si hay QR activo, él mismo pedirá sus propios frames.
+        if (!qrScannerActive) return; 
+    }
+
+    // 2. LIMPIEZA
+    ctx.fillStyle = "#fff"; 
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 if (appState === 1) {
     // Forzamos que el video se dibuje ocupando TODO el ancho y alto del canvas (4000x2000)
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -165,6 +175,7 @@ ctx.fillStyle="#3498db"; ctx.beginPath(); ctx.arc(cp.x, cp.y, 12, 0, 7); ctx.fil
 } else {
 renderFinal();
 }
+
 requestAnimationFrame(draw);
 }
 
@@ -303,6 +314,8 @@ function updateVisualCache() {
     for(let r=0; r<ROWS; r++) tCtx.fillText(r+1, mL - 30, mT + (r+0.5)*cH + 10);
 
     cacheFinalCanvas = tempCanvas;
+    draw(); // <--- AÑADIR ESTO AL FINAL
+
 }
 
 
@@ -415,7 +428,7 @@ function uB() {
     // GUARDAR EN TIEMPO REAL:
     if (v !== "") {
         colNames[LETTERS[namingIdx]] = v;
-        updateVisualCache(); // Esto actualiza el dibujo con el nombre nuevo
+        updateVisualCache(); // Esto ya llamará a draw()
     }
 }
 
@@ -471,8 +484,9 @@ canvas.addEventListener('pointerdown', e => {
     const rIdx = Math.floor((my - 100) / (gridH / ROWS));
     
     const s = cellScores.find(x => x.r === rIdx && x.c === c); 
-    if(s) s.score = s.score >= 5 ? 1 : 10; // Si es >=5 baja a 1, si es <5 sube a 10
-    updateVisualCache(); // <--- REGENERAR CACHÉ AL TOCAR
+    // ... dentro del if(appState === 3 || appState === 4) ...
+if(s) s.score = s.score >= 5 ? 1 : 10;
+updateVisualCache(); // Esto ya llamará a draw()
 }
 });
 
