@@ -88,6 +88,7 @@ const video = document.getElementById('video');
 const ui = document.getElementById('dynamic-buttons');
 const stepLabel = document.getElementById('step-label');
 
+let cacheFinalCanvas = null; // Guardará el renderizado estático
 let qrScannerActive = false;
 let showFilter = true; // Controla si vemos el filtro o la imagen real
 let processedCells = []; // Guardará los recortes ya filtrados para no repetir el trabajo
@@ -168,90 +169,17 @@ requestAnimationFrame(draw);
 }
 
 function renderFinal() {
-    // Márgenes y dimensiones del grid
-    const mL = 160, mT = 120, mB = 100;
-    const gW = canvas.width - mL - 80, gH = canvas.height - mT - mB;
-    const cW = gW / COLS, cH = gH / ROWS;
-
-    // 1. Fondo blanco para el reporte
-    ctx.fillStyle = "#fff"; 
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // 2. Encabezado
-    ctx.fillStyle = "#000"; 
-    ctx.font = "bold 40px Arial"; 
-    ctx.textAlign = "left";
-    ctx.fillText(`ID: ${trayID}`, mL, 70);
-    
-    ctx.font = "22px Arial"; 
-    ctx.textAlign = "right";
-    ctx.fillText(`Captura: ${tsCapture}`, canvas.width - 80, 70);
-
-    // 3. Dibujar cada celda
-    cellScores.forEach((s, index) => {
-        const x = mL + s.c * cW, y = mT + s.r * cH;
-        
-        // Calculamos el centro exacto según la deformación de la rejilla
-        const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
-        
-        const zoomSize = 100; // Tamaño del recorte (ajustado para 2880px)
-        const offset = zoomSize / 2;
-
-        // SEGURIDAD: Evitar que el recorte se salga de la imagen de 2880x1620
-const ajusteX = 0; // Prueba valores entre -200 y 200
-const ajusteY = 0;
-
-// Quitamos el Math.max/min temporalmente para ver el efecto real
-let sx = p.x - offset + ajusteX;
-let sy = p.y - offset + ajusteY;
-
-// Dibujamos con el recorte
-ctx.drawImage(capturedImg, 
-    sx, sy, zoomSize, zoomSize, 
-    x + 4, y + 4, cW - 8, cH - 8
-);
-
-        // Dibujo de la planta (Filtrada o Real)
-        if (showFilter && processedCells[index]) {
-    // !!! AQUÍ USAMOS LA IMAGEN PRE-PROCESADA CON EL FILTRO NEGRO !!!
-    // processedCells[index] es el canvas temporal que creamos en preProcessGreenFilter
-    ctx.drawImage(processedCells[index], x + 2, y + 2, cW - 4, cH - 4);
-} else {
-    // Recorte directo de la imagen original CENTRADO (sin filtro)
-    ctx.drawImage(capturedImg, 
-        sx, sy, zoomSize, zoomSize, 
-        x + 2, y + 2, cW - 4, cH - 4
-    );
+    if (cacheFinalCanvas) {
+        ctx.drawImage(cacheFinalCanvas, 0, 0);
+    } else {
+        // Si por algún motivo no hay caché, mostramos fondo blanco
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 }
 
 
-        // --- BARRA DE DATOS Y SCORE ---
-        const color = getScoreColor(s.score);
-        ctx.fillStyle = color;
-        ctx.font = "bold 24px Arial"; 
-        ctx.textAlign = "left";
-        ctx.textBaseline = "bottom";
-        ctx.fillText(s.score, x + 10, y + cH - 10);
 
-        if(appState >= 6 && colNames[LETTERS[s.c]]) {
-            ctx.fillStyle = "#666";
-            ctx.font = "14px Arial";
-            ctx.textAlign = "right";
-            let name = colNames[LETTERS[s.c]];
-            if(name.length > 10) name = name.substring(0,9) + "..";
-            ctx.fillText(name, x + cW - 10, y + cH - 10);
-        }
-    });
-
-    // 4. Nomenclatura de ejes
-    ctx.fillStyle = "#333";
-    ctx.font = "bold 22px Arial";
-    ctx.textAlign = "center";
-    for(let c=0; c<COLS; c++) ctx.fillText(LETTERS[c], mL + (c+0.5)*cW, canvas.height - 40);
-    
-    ctx.textAlign = "right";
-    for(let r=0; r<ROWS; r++) ctx.fillText(r+1, mL - 30, mT + (r+0.5)*cH + 10);
-}
 async function takePhoto() {
     const targetW = 2880;
     const targetH = 1620;
@@ -289,55 +217,92 @@ return colors[score - 1] || "#fff";
 
 
 function preProcessGreenFilter() {
-    processedCells = []; // Vaciamos la caché anterior
-    const zoomSize = 100; // !!! IMPORTANTE: Debe ser igual que en renderFinal !!!
+    processedCells = [];
+    const zoomSize = 100;
     const offset = zoomSize / 2;
 
     cellScores.forEach(s => {
-        // 1. Calculamos el centro exacto de la celda (misma lógica que renderFinal)
         const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
-        
-        // 2. Definimos las coordenadas de recorte seguras (misma lógica que renderFinal)
         let sx = Math.max(0, Math.min(2880 - zoomSize, p.x - offset));
         let sy = Math.max(0, Math.min(1620 - zoomSize, p.y - offset));
 
-        // 3. Creamos un canvas temporal para este recorte
         const offCanvas = document.createElement('canvas');
         offCanvas.width = zoomSize;
         offCanvas.height = zoomSize;
         const offCtx = offCanvas.getContext('2d');
 
-        // 4. Dibujamos el recorte CENTRADO de la imagen original en el canvas temporal
         offCtx.drawImage(capturedImg, sx, sy, zoomSize, zoomSize, 0, 0, zoomSize, zoomSize);
 
-        // 5. OBTENEMOS LOS PÍXELES PARA APLICAR EL FILTRO
         const imgData = offCtx.getImageData(0, 0, zoomSize, zoomSize);
-        const d = imgData.data; // Array de píxeles [R, G, B, A, R, G, B, A, ...]
+        const d = imgData.data;
 
-        // 6. BUCLE DE PROCESAMIENTO (El "chroma key" verde)
         for (let i = 0; i < d.length; i += 4) {
-            const r = d[i];     // Rojo
-            const g = d[i + 1]; // Verde
-            const b = d[i + 2]; // Azul
-            // d[i + 3] es el Alpha (transparencia), no lo tocamos
-
-            // Definimos qué es "verde" (misma lógica que processAutoScoring)
+            const r = d[i], g = d[i + 1], b = d[i + 2];
             const isGreen = (g > r * 1.1 && g > b * 1.1 && g > 40);
-
-            // Si NO es verde, lo pintamos de negro opaco
-            if (!isGreen) {
-                d[i] = 0;     // R -> 0
-                d[i + 1] = 0; // G -> 0
-                d[i + 2] = 0; // B -> 0
-            }
+            if (!isGreen) { d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; }
         }
-        
-        // 7. Volvemos a poner los píxeles modificados en el canvas temporal
         offCtx.putImageData(imgData, 0, 0);
-
-        // 8. Guardamos este canvas procesado en el array de caché
         processedCells.push(offCanvas);
     });
+
+    // --- NUEVO: Generar Caché Visual para evitar proceso en tiempo real ---
+    updateVisualCache(); 
+}
+
+function updateVisualCache() {
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    const tCtx = tempCanvas.getContext('2d');
+
+    // 1. Fondo y Encabezado
+    tCtx.fillStyle = "#fff"; tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+    tCtx.fillStyle = "#000"; tCtx.font = "bold 40px Arial"; tCtx.textAlign = "left";
+    tCtx.fillText(`ID: ${trayID}`, 160, 70);
+    tCtx.textAlign = "right";
+    tCtx.fillText(`Captura: ${tsCapture}`, tempCanvas.width - 80, 70);
+
+    const mL = 160, mT = 120, mB = 100;
+    const gW = tempCanvas.width - mL - 80, gH = tempCanvas.height - mT - mB;
+    const cW = gW / COLS, cH = gH / ROWS;
+
+    // 2. Dibujar celdas
+    cellScores.forEach((s, index) => {
+        const x = mL + s.c * cW, y = mT + s.r * cH;
+        const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
+        const zoomSize = 100;
+        const offset = zoomSize / 2;
+
+        if (showFilter && processedCells[index]) {
+            tCtx.drawImage(processedCells[index], x + 2, y + 2, cW - 4, cH - 4);
+        } else {
+            tCtx.drawImage(capturedImg, p.x - offset, p.y - offset, zoomSize, zoomSize, x + 2, y + 2, cW - 4, cH - 4);
+        }
+
+        // Score
+        tCtx.fillStyle = getScoreColor(s.score);
+        tCtx.font = "bold 24px Arial";
+        tCtx.textAlign = "left";
+        tCtx.fillText(s.score, x + 10, y + cH - 10);
+
+        // NOMBRES (Solo si ya existen)
+        if(colNames[LETTERS[s.c]]) {
+            tCtx.fillStyle = "#666";
+            tCtx.font = "14px Arial";
+            tCtx.textAlign = "right";
+            let name = colNames[LETTERS[s.c]];
+            if(name.length > 10) name = name.substring(0,9) + "..";
+            tCtx.fillText(name, x + cW - 10, y + cH - 10);
+        }
+    });
+
+    // 3. Ejes
+    tCtx.fillStyle = "#333"; tCtx.font = "bold 22px Arial"; tCtx.textAlign = "center";
+    for(let c=0; c<COLS; c++) tCtx.fillText(LETTERS[c], mL + (c+0.5)*cW, tempCanvas.height - 40);
+    tCtx.textAlign = "right";
+    for(let r=0; r<ROWS; r++) tCtx.fillText(r+1, mL - 30, mT + (r+0.5)*cH + 10);
+
+    cacheFinalCanvas = tempCanvas;
 }
 
 
@@ -397,7 +362,7 @@ function updateStep3UI() {
     ui.innerHTML = `
         <div style="display:flex; flex-direction:column; gap:10px; width:100%;">
             <p style="color:#2ecc71; font-size:12px; text-align:center; margin:0;">MODO EDICIÓN ACTIVO</p>
-            <button class="btn btn-alt" onclick="showFilter = !showFilter; updateStep3UI();">
+            <button class="btn btn-alt" onclick="showFilter = !showFilter; updateVisualCache(); updateStep3UI();">
                 ${showFilter ? 'VER ORIGINAL' : 'VER FILTRADO'}
             </button>
             <button class="btn btn-main" onclick="setStep(5)">ACEPTAR CORRECCIÓN</button>
@@ -441,8 +406,36 @@ if(step===7) {
 }
 }
 
-function uB() { const v = document.getElementById('cI').value; document.getElementById('bN').disabled = v === ""; document.getElementById('bM').disabled = v !== ""; }
-function sN(nxt) { colNames[LETTERS[namingIdx]] = nxt ? document.getElementById('cI').value : lastColName; lastColName = colNames[LETTERS[namingIdx]]; namingIdx++; if(namingIdx<COLS) setStep(6); else setStep(7); }
+function uB() { 
+    const v = document.getElementById('cI').value; 
+    // Habilitar/deshabilitar botones
+    document.getElementById('bN').disabled = v === ""; 
+    document.getElementById('bM').disabled = v !== ""; 
+
+    // GUARDAR EN TIEMPO REAL:
+    if (v !== "") {
+        colNames[LETTERS[namingIdx]] = v;
+        updateVisualCache(); // Esto actualiza el dibujo con el nombre nuevo
+    }
+}
+
+
+
+function sN(nxt) { 
+    // Si nxt es false, usa el nombre anterior
+    colNames[LETTERS[namingIdx]] = nxt ? document.getElementById('cI').value : lastColName; 
+    lastColName = colNames[LETTERS[namingIdx]]; 
+    
+    namingIdx++; 
+    
+    updateVisualCache(); // <--- CRUCIAL: Actualiza el dibujo antes de pasar al siguiente paso
+
+    if(namingIdx < COLS) {
+        setStep(6); 
+    } else {
+        setStep(7); 
+    }
+}
 
 canvas.addEventListener('pointerdown', e => {
     const rect = canvas.getBoundingClientRect();
@@ -479,6 +472,7 @@ canvas.addEventListener('pointerdown', e => {
     
     const s = cellScores.find(x => x.r === rIdx && x.c === c); 
     if(s) s.score = s.score >= 5 ? 1 : 10; // Si es >=5 baja a 1, si es <5 sube a 10
+    updateVisualCache(); // <--- REGENERAR CACHÉ AL TOCAR
 }
 });
 
