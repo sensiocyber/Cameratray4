@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Analizador Agrícola V9.2 - Control Total</title>
+    <style>
+    body { 
+    margin: 0; 
+    background: #111; 
+    font-family: sans-serif; 
+    /* Usa dvh para adaptarse dinámicamente si la barra de direcciones sube/baja */
+    height: 100%; 
+    width: 100%;
+    display: flex; 
+    flex-direction: row; 
+    overflow: hidden; 
+    position: fixed; /* Evita que el cuerpo rebote o haga scroll elástico */
+}
+#view-container { 
+    flex: 1; 
+    position: relative; 
+    background: #000; 
+    width: calc(100% - 200px);
+    height: 100%;
+    display: flex; 
+    justify-content: center; 
+    align-items: center;
+    overflow: hidden; /* Vital para Android */
+}
+    canvas { 
+    max-width: 100%; 
+    max-height: 100%; 
+    width: auto;   /* Deja que el navegador calcule el ancho */
+    height: auto;  /* Deja que el navegador calcule el alto */
+    object-fit: contain; 
+    display: block; 
+    touch-action: none;
+    image-rendering: auto; 
+    border: 1px solid #333; 
+}
+    video { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    #ui-panel { 
+        flex: 0 0 200px; background: #222; border-left: 3px solid #444; 
+        display: flex; flex-direction: column; align-items: center; 
+        padding: 10px; z-index: 100; overflow-y: auto; 
+        
+    }
+    .btn { 
+        padding: 12px 5px; font-size: 13px; font-weight: bold; 
+        border-radius: 10px; border: none; width: 95%; 
+        margin: 8px 0; text-transform: uppercase; color: white; cursor: pointer;
+    }
+    .btn-main { background: #2ecc71; box-shadow: 0 3px 0 #27ae60; }
+    .btn-alt { background: #3498db; box-shadow: 0 3px 0 #2980b9; }
+    .btn-danger { background: #e74c3c; box-shadow: 0 3px 0 #c0392b; }
+    input { 
+        width: 90%; padding: 10px; font-size: 16px; border-radius: 8px; 
+        border: 2px solid #555; background: #333; color: white; 
+        margin-bottom: 8px; text-align: center; 
+    }
+    
+    .step-info { 
+        position: fixed; top: 10px; left: 10px; 
+        background: rgba(0,0,0,0.8); padding: 5px 15px; 
+        border-radius: 20px; font-size: 11px; border: 1px solid #555; z-index: 1000; 
+    }
+    
+#file-input { display: none; }
+
+    </style>
+</head>
+<body>
+
+<div id="view-container">
+<div id="step-label" class="step-info">PASO 1: ENCUADRE</div>
+<canvas id="mainCanvas"></canvas>
+<video id="video" autoplay playsinline></video>
+<input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
+</div>
+
+<div id="ui-panel"><div id="dynamic-buttons"></div></div>
+
+<script>
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const video = document.getElementById('video');
+const ui = document.getElementById('dynamic-buttons');
+const stepLabel = document.getElementById('step-label');
+
+let qrScannerActive = false;
+let showFilter = true; // Controla si vemos el filtro o la imagen real
+let processedCells = []; // Guardará los recortes ya filtrados para no repetir el trabajo
+let appState = 1; 
+let rotationAngle = 0; // 0, 90, 180, 270
+let capturedImg = null; 
+let points = []; 
+let pCenter = { tx: 0.5, ty: 0.5 }; // Centro relativo (0-1)
+let draggingIdx = null; // 0-3 esquinas, 4 centro
+let csvDownloaded = false;
+let imgDownloaded = false;
+
+const COLS = 21; const ROWS = 14;
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTU".split("");
+let cellScores = []; 
+let trayID = "", colNames = {}, namingIdx = 0, lastColName = "", tsCapture = "";
+
+async function init() {
+try {
+const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 1920, height: 1080 } });
+video.srcObject = stream;
+video.onloadedmetadata = () => { canvas.width = 1920; canvas.height = 1080; setStep(1); requestAnimationFrame(draw); };
+} catch (e) { alert("Error cámara"); }
+}
+
+// MAPEO DE PERSPECTIVA (ESTIRAR)
+function mapT(t, pivot) { return t * pivot / (t * pivot + (1 - t) * (1 - pivot)); }
+function getXY(tx, ty) {
+const ttx = mapT(tx, pCenter.tx);
+const tty = mapT(ty, pCenter.ty);
+const top = { x: points[0].x + (points[1].x - points[0].x) * ttx, y: points[0].y + (points[1].y - points[0].y) * ttx };
+const bot = { x: points[3].x + (points[2].x - points[3].x) * ttx, y: points[3].y + (points[2].y - points[3].y) * ttx };
+return { x: top.x + (bot.x - top.x) * tty, y: top.y + (bot.y - top.y) * tty };
+}
+
+function draw() {
+ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+if (appState === 1) {
+ctx.drawImage(video, 0, 0);
+ctx.strokeStyle = "#0f0"; ctx.lineWidth = 6;
+ctx.strokeRect(canvas.width*0.2, canvas.height*0.2, canvas.width*0.6, canvas.height*0.6);
+} else if (appState === 2) {
+ctx.drawImage(capturedImg, 0, 0);
+// Máscara 70% blanco
+ctx.fillStyle = "rgba(255,255,255,0.7)";
+ctx.beginPath(); ctx.rect(0, 0, canvas.width, canvas.height);
+for(let r=0; r<ROWS; r++) {
+for(let c=0; c<COLS; c++) {
+const p1 = getXY((c+0.1)/COLS, (r+0.1)/ROWS);
+const p2 = getXY((c+0.9)/COLS, (r+0.1)/ROWS);
+const p3 = getXY((c+0.9)/COLS, (r+0.9)/ROWS);
+const p4 = getXY((c+0.1)/COLS, (r+0.9)/ROWS);
+ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y); ctx.closePath();
+}
+}
+ctx.fill("evenodd");
+// Puntos más pequeños (Radio 12px)
+points.forEach(p => { ctx.fillStyle="#ff4444"; ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, 7); ctx.fill(); });
+const cp = getXY(pCenter.tx, pCenter.ty);
+ctx.fillStyle="#3498db"; ctx.beginPath(); ctx.arc(cp.x, cp.y, 12, 0, 7); ctx.fill();
+} else {
+renderFinal();
+}
+requestAnimationFrame(draw);
+}
+
+function renderFinal() {
+    const mL = 160, mT = 100, mB = 100;
+    const gW = canvas.width - mL - 80, gH = canvas.height - mT - mB;
+    const cW = gW / COLS, cH = gH / ROWS;
+
+    // Fondo blanco para el reporte
+    ctx.fillStyle = "#fff"; ctx.fillRect(0,0, canvas.width, canvas.height);
+
+    // Encabezado
+    ctx.fillStyle = "#000"; ctx.font = "bold 35px Arial"; ctx.textAlign = "left";
+    ctx.fillText(`ID: ${trayID}`, mL, 60);
+    ctx.font = "20px Arial"; ctx.textAlign = "right";
+    ctx.fillText(`Captura: ${tsCapture}`, canvas.width - 80, 60);
+
+    // Creamos un canvas temporal oculto para procesar el "chroma" verde
+    const offCanvas = document.createElement('canvas');
+    const offCtx = offCanvas.getContext('2d');
+    const zoomSize = 80;
+    offCanvas.width = zoomSize;
+    offCanvas.height = zoomSize;
+
+    cellScores.forEach((s, index) => {
+    const x = mL + s.c*cW, y = mT + s.r*cH;
+    const p = getXY((s.c+0.5)/COLS, (s.r+0.5)/ROWS);
+    const zoomSize = 80;
+    const offset = zoomSize / 2;
+
+    // Dibujo de la planta (Filtrada o Real)
+    if (showFilter && processedCells[index]) {
+        ctx.drawImage(processedCells[index], x + 4, y + 4, cW - 8, cH - 4);
+    } else {
+        ctx.drawImage(capturedImg, p.x - offset, p.y - offset, zoomSize, zoomSize, x + 4, y + 4, cW - 8, cH - 4);
+    }
+
+        // 2. Procesamos los píxeles (Filtro Verde)
+        const imgData = offCtx.getImageData(0, 0, zoomSize, zoomSize);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i+1], b = d[i+2];
+            // Condición: Si NO es suficientemente verde, lo pintamos de negro
+            // Usamos la misma lógica que en processAutoScoring para consistencia
+            const isGreen = (g > r * 1.1 && g > b * 1.1 && g > 40);
+            
+            if (!isGreen) {
+                d[i] = 0;     // Red
+                d[i+1] = 0;   // Green
+                d[i+2] = 0;   // Blue
+                // d[i+3] es Alpha, lo dejamos en 255 para que sea negro opaco
+            }
+        }
+        offCtx.putImageData(imgData, 0, 0);
+
+        // 3. Dibujamos el resultado procesado en el canvas principal
+        ctx.drawImage(offCanvas, x + 4, y + 4, cW - 8, cH - 4);
+
+        // --- BARRA DE DATOS INFERIOR ---
+        const barH = 22;
+        const color = getScoreColor(s.score);
+        ctx.fillStyle = color;
+        ctx.font = "bold 18px Arial"; 
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(s.score, x + 10, y + cH - barH/2 - 4);
+
+        if(appState >= 6 && colNames[LETTERS[s.c]]) {
+            ctx.fillStyle = "#333"; // Cambiado a oscuro para leer sobre fondo blanco del reporte
+            ctx.font = "15px Arial";
+            ctx.textAlign = "right";
+            let name = colNames[LETTERS[s.c]];
+            if(name.length > 8) name = name.substring(0,7) + "..";
+            ctx.fillText(name, x + cW - 10, y + cH - barH/2 - 4);
+        }
+    });
+
+    // --- NOMENCLATURA DE EJES ---
+    ctx.fillStyle = "#333";
+    ctx.font = "bold 20px Arial";
+    ctx.textAlign = "center";
+    for(let c=0; c<COLS; c++) ctx.fillText(LETTERS[c], mL + (c+0.5)*cW, canvas.height - 40);
+    ctx.textAlign = "right";
+    for(let r=0; r<ROWS; r++) ctx.fillText(r+1, mL - 25, mT + (r+0.5)*cH + 7);
+}
+async function takePhoto() {
+const tmp = document.createElement('canvas'); tmp.width = 1920; tmp.height = 1080;
+tmp.getContext('2d').drawImage(video, 0, 0);
+capturedImg = await createImageBitmap(tmp);
+tsCapture = new Date().toLocaleString();
+points = [{x:400, y:250}, {x:1520, y:250}, {x:1520, y:830}, {x:400, y:830}];
+pCenter = { tx: 0.5, ty: 0.5 };
+setStep(2);
+}
+
+function getScoreColor(score) {
+// 1-3: Tonos Rojos/Naranjas | 4-7: Amarillos/Ocres | 8-10: Verdes
+const colors = [
+"#e74c3c", "#e67e22", "#f1c40f", "#f39c12", "#dce775", 
+"#aed581", "#81c784", "#4caf50", "#2ecc71", "#27ae60"
+];
+return colors[score - 1] || "#fff";
+}
+
+
+function preProcessGreenFilter() {
+    processedCells = [];
+    const zoomSize = 80;
+    const offCanvas = document.createElement('canvas');
+    const offCtx = offCanvas.getContext('2d');
+    offCanvas.width = zoomSize;
+    offCanvas.height = zoomSize;
+
+    cellScores.forEach(s => {
+        const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
+        const offset = zoomSize / 2;
+
+        offCtx.clearRect(0, 0, zoomSize, zoomSize);
+        offCtx.drawImage(capturedImg, p.x - offset, p.y - offset, zoomSize, zoomSize, 0, 0, zoomSize, zoomSize);
+
+        const imgData = offCtx.getImageData(0, 0, zoomSize, zoomSize);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+            const r = d[i], g = d[i + 1], b = d[i + 2];
+            if (!(g > r * 1.1 && g > b * 1.1 && g > 40)) {
+                d[i] = d[i + 1] = d[i + 2] = 0; // Negro
+            }
+        }
+        
+        const cellImg = document.createElement('canvas');
+        cellImg.width = zoomSize;
+        cellImg.height = zoomSize;
+        cellImg.getContext('2d').putImageData(imgData, 0, 0);
+        processedCells.push(cellImg);
+    });
+}
+
+
+function processAutoScoring() {
+cellScores = [];
+// Usamos un canvas auxiliar para leer los píxeles de la imagen capturada
+const t = document.createElement('canvas'); 
+t.width = 1920; t.height = 1080;
+const tc = t.getContext('2d'); 
+tc.drawImage(capturedImg, 0, 0);
+
+for(let r=0; r<ROWS; r++) {
+for(let c=0; c<COLS; c++) {
+// Definimos el área de la celda (un cuadrado alrededor del centro proyectado)
+const p = getXY((c+0.5)/COLS, (r+0.5)/ROWS);
+const scanSize = 40; // Tamaño del bloque a escanear por celda
+const d = tc.getImageData(p.x - scanSize/2, p.y - scanSize/2, scanSize, scanSize).data;
+
+let greenCount = 0;
+for(let i=0; i<d.length; i+=4) {
+const r = d[i], g = d[i+1], b = d[i+2];
+// Filtro de verdor: El verde debe ser mayor que el rojo y el azul
+// y tener una intensidad mínima para descartar sombras oscuras
+if(g > r * 1.1 && g > b * 1.1 && g > 40) {
+greenCount++;
+}
+}
+
+// Calculamos el porcentaje de ocupación
+const percent = greenCount / (scanSize * scanSize);
+
+// Mapeo a escala 1-10
+// 0.4 (40% de la celda verde) suele ser un "10" visual en bandejas forestales/agrícolas
+let score = Math.min(10, Math.max(1, Math.ceil(percent / 0.05 * 10)));
+
+cellScores.push({ r, c, score: score });
+}
+}
+setStep(3);
+}
+
+function setStep(step) {
+appState = step; ui.innerHTML = "";
+stepLabel.innerText = "PASO " + Math.floor(step);
+if(step===1) {
+    ui.innerHTML = `
+        <button class="btn btn-main" onclick="takePhoto()">TOMAR FOTO</button>
+        <button class="btn btn-alt" onclick="document.getElementById('file-input').click()">SUBIR ARCHIVO</button>
+    `;
+}
+if(step===2) ui.innerHTML = `<button class="btn btn-main" onclick="processAutoScoring()">CONFIRMAR REJILLA</button>`;
+if(step === 3) {
+    preProcessGreenFilter();
+    updateStep3UI();
+}
+
+function updateStep3UI() {
+    ui.innerHTML = `
+        <div style="display:flex; flex-direction:column; gap:10px; width:100%;">
+            <p style="color:#2ecc71; font-size:12px; text-align:center; margin:0;">MODO EDICIÓN ACTIVO</p>
+            <button class="btn btn-alt" onclick="showFilter = !showFilter; updateStep3UI();">
+                ${showFilter ? 'VER ORIGINAL' : 'VER FILTRADO'}
+            </button>
+            <button class="btn btn-main" onclick="setStep(5)">ACEPTAR CORRECCIÓN</button>
+            <p style="color:#aaa; font-size:11px; text-align:center;">Toca una celda para cambiar entre 1 y 10</p>
+        </div>
+    `;
+}
+if(step===5) {
+    ui.innerHTML = `
+        <div style="width:100%; display:flex; flex-direction:column; align-items:center; gap:10px;">
+            <p style="color:#aaa; font-size:12px; margin:0;">IDENTIFICAR BANDEJA</p>
+            
+            <div id="qr-preview-container" style="display:none; width:180px; height:140px; border:2px solid #2ecc71; border-radius:8px; overflow:hidden; position:relative; background:#000;">
+                <canvas id="qr-canvas" style="width:100%; height:100%; object-fit:cover;"></canvas>
+                <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:60%; height:60%; border:1px solid rgba(46, 204, 113, 0.5); pointer-events:none;"></div>
+            </div>
+
+            <button class="btn btn-alt" id="btn-qr" onclick="toggleQRScanner()">LEER QR</button>
+            
+            <div style="width:100%; height:1px; background:#444; margin:5px 0;"></div>
+            
+            <input type="text" id="tI" placeholder="ID O NOMBRE..." value="${trayID}">
+            <button class="btn btn-main" onclick="trayID=document.getElementById('tI').value; if(trayID){qrScannerActive=false; setStep(6);}">ACEPTAR</button>
+        </div>
+    `;
+}
+
+if(step===6) {
+    const L = LETTERS[namingIdx];
+    ui.innerHTML = `
+        <p style="margin-bottom:10px; color:#aaa;">COLUMNA ${L}</p>
+        <input type="text" id="cI" placeholder="NOMBRE..." oninput="uB()">
+        <div style="display:flex; flex-direction:column; width:100%; align-items:center; gap:10px; margin-top:10px;">
+            <button id="bN" class="btn btn-main" onclick="sN(true)" disabled>SIGUIENTE</button>
+            <button id="bM" class="btn btn-alt" onclick="sN(false)">MISMO QUE ANTERIOR</button>
+            <button class="btn btn-danger" style="background:#7f8c8d; box-shadow: 0 3px 0 #34495e;" onclick="setStep(7)">OMITIR RENOMBRADO</button>
+        </div>`;
+}
+if(step===7) {
+    updateFinalUI();
+}
+}
+
+function uB() { const v = document.getElementById('cI').value; document.getElementById('bN').disabled = v === ""; document.getElementById('bM').disabled = v !== ""; }
+function sN(nxt) { colNames[LETTERS[namingIdx]] = nxt ? document.getElementById('cI').value : lastColName; lastColName = colNames[LETTERS[namingIdx]]; namingIdx++; if(namingIdx<COLS) setStep(6); else setStep(7); }
+
+canvas.addEventListener('pointerdown', e => {
+    const rect = canvas.getBoundingClientRect();
+    
+    // Calculamos la escala real entre los píxeles del canvas (1920) y los píxeles de la pantalla
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    // Coordenadas exactas relativas al lienzo
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+
+    if(appState === 2) {
+        // Aumentamos el radio de detección a 60 para facilitar el toque
+        const cp = getXY(pCenter.tx, pCenter.ty);
+        if(Math.hypot(cp.x - mx, cp.y - my) < 60) {
+            draggingIdx = 4;
+        } else {
+            points.forEach((p, i) => { 
+                if(Math.hypot(p.x - mx, p.y - my) < 60) draggingIdx = i; 
+            });
+        }
+    } else if(appState === 3 || appState === 4) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+
+    const gridW = (1920 - 240);
+    const gridH = (1080 - 180);
+    const c = Math.floor((mx - 160) / (gridW / COLS));
+    const rIdx = Math.floor((my - 100) / (gridH / ROWS));
+    
+    const s = cellScores.find(x => x.r === rIdx && x.c === c); 
+    if(s) s.score = s.score >= 5 ? 1 : 10; // Si es >=5 baja a 1, si es <5 sube a 10
+}
+});
+
+canvas.addEventListener('pointermove', e => {
+    if(draggingIdx === null) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+    
+    if(draggingIdx === 4) {
+        pCenter.tx = Math.max(0.05, Math.min(0.95, mx / 1920));
+        pCenter.ty = Math.max(0.05, Math.min(0.95, my / 1080));
+    } else { 
+        // Limitamos para que no se salgan del canvas
+        points[draggingIdx].x = Math.max(0, Math.min(1920, mx)); 
+        points[draggingIdx].y = Math.max(0, Math.min(1080, my)); 
+    }
+});
+canvas.addEventListener('pointerup', () => draggingIdx = null);
+
+function updateFinalUI() {
+    // 1. Agrupar datos por nombre de columna
+    const totals = {};
+
+    LETTERS.forEach((letter, index) => {
+        const name = colNames[letter] || `Col ${letter}`;
+        
+        // Si el nombre no existe en nuestro objeto de totales, lo creamos
+        if (!totals[name]) {
+            totals[name] = { high: 0, low: 0 };
+        }
+
+        // Filtramos las celdas que pertenecen a esta columna física (index)
+        const cells = cellScores.filter(s => s.c === index);
+        
+        // Sumamos al total del grupo (nombre)
+        totals[name].high += cells.filter(s => s.score >= 5).length;
+        totals[name].low += cells.filter(s => s.score < 5).length;
+    });
+
+    // 2. Generar el HTML de la tabla de resumen
+    let statsHtml = `
+        <div style="width:95%; background:#333; border-radius:8px; padding:10px; margin-bottom:15px; border:1px solid #444;">
+            <h4 style="margin:0 0 8px 0; color:#2ecc71; text-align:center; font-size:13px; text-transform:uppercase;">Resumen por Lote</h4>
+            <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:center;">
+                <thead>
+                    <tr style="border-bottom:1px solid #555; color:#aaa;">
+                        <th style="text-align:left; padding-bottom:5px;">Nombre</th>
+                        <th style="color:#2ecc71;">≥5</th>
+                        <th style="color:#e74c3c;"><5</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+
+    // Recorremos el objeto de totales para llenar la tabla
+    for (const name in totals) {
+        statsHtml += `
+            <tr style="border-bottom:1px solid #444;">
+                <td style="text-align:left; padding:6px 0; font-weight:bold; color:#3498db;">${name}</td>
+                <td style="color:#2ecc71; font-weight:bold;">${totals[name].high}</td>
+                <td style="color:#e74c3c; font-weight:bold;">${totals[name].low}</td>
+            </tr>`;
+    }
+
+    statsHtml += `</tbody></table></div>`;
+
+    // 3. Renderizar en el panel
+    let html = `
+        <div style="display:flex; flex-direction:column; width:100%; align-items:center;">
+            ${statsHtml}
+            <button class="btn btn-main" onclick="downloadCSV()">DESCARGAR CSV</button>
+            <button class="btn btn-alt" onclick="downloadImage()">DESCARGAR IMAGEN</button>
+            <button class="btn btn-danger" style="margin-top:10px;" onclick="namingIdx=0;setStep(6)">REPETIR NOMBRES</button>
+    `;
+
+    if (csvDownloaded && imgDownloaded) {
+        html += `<button class="btn" style="background:#f39c12; margin-top:20px; border:2px solid white;" onclick="location.reload()">+ NUEVA CAPTURA</button>`;
+    }
+
+    html += `</div>`;
+    ui.innerHTML = html;
+}
+
+function downloadCSV() {
+    // Añadimos "Letra_Col" a la cabecera
+    let csv = "ID;Letra_Col;Nombre_Personalizado;Fila;Score;TS\n";
+    
+    cellScores.forEach(s => {
+        const letra = LETTERS[s.c]; // Obtenemos A, B, C...
+        const nombreManual = colNames[letra] || "Sin Nombre";
+        
+        // Estructura: ID; Letra; Nombre; Fila; Puntaje; Fecha
+        csv += `${trayID};${letra};${nombreManual};${s.r+1};${s.score};${tsCapture}\n`;
+    });
+
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+    a.download = `DATOS_${trayID}.csv`;
+    a.click();
+    
+    csvDownloaded = true;
+    updateFinalUI();
+}
+
+function downloadImage() {
+    const i = document.createElement('a');
+    i.href = canvas.toDataURL('image/jpeg', 0.9);
+    i.download = `REPORTE_${trayID}.jpg`;
+    i.click();
+    imgDownloaded = true;
+    updateFinalUI();
+}
+init();
+
+async function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const img = new Image();
+        img.onload = async function() {
+            // Creamos un canvas temporal para asegurar que la imagen tenga el tamaño esperado (1920x1080)
+            const tmp = document.createElement('canvas');
+            tmp.width = 1920;
+            tmp.height = 1080;
+            const tCtx = tmp.getContext('2d');
+            
+            // Dibujamos la imagen cargada ajustándola al lienzo
+            tCtx.drawImage(img, 0, 0, 1920, 1080);
+            
+            capturedImg = await createImageBitmap(tmp);
+            tsCapture = new Date().toLocaleString() + " (Archivo)";
+            points = [{x:400, y:250}, {x:1520, y:250}, {x:1520, y:830}, {x:400, y:830}];
+            pCenter = { tx: 0.5, ty: 0.5 };
+            setStep(2);
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+
+async function toggleQRScanner() {
+    const container = document.getElementById('qr-preview-container');
+    const btn = document.getElementById('btn-qr');
+    const input = document.getElementById('tI');
+    
+    if (!qrScannerActive) {
+        // Activar Escáner
+        qrScannerActive = true;
+        container.style.display = 'block';
+        btn.innerText = "CANCELAR QR";
+        btn.classList.replace('btn-alt', 'btn-danger');
+        scanQR();
+    } else {
+        // Desactivar
+        qrScannerActive = false;
+        container.style.display = 'none';
+        btn.innerText = "LEER QR";
+        btn.classList.replace('btn-danger', 'btn-alt');
+    }
+}
+
+async function scanQR() {
+    if (!qrScannerActive || appState !== 5) return;
+
+    const qrCanvas = document.getElementById('qr-canvas');
+    if (!qrCanvas) return;
+    const qctx = qrCanvas.getContext('2d');
+    
+    // Dibujamos lo que ve la cámara principal en el pequeño canvas de la derecha
+    qrCanvas.width = video.videoWidth / 4;
+    qrCanvas.height = video.videoHeight / 4;
+    qctx.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
+
+    try {
+        // Usamos BarcodeDetector si está disponible (Chrome/Android)
+        if ('BarcodeDetector' in window) {
+            const detector = new BarcodeDetector({ formats: ['qr_code'] });
+            const barcodes = await detector.detect(qrCanvas);
+            if (barcodes.length > 0) {
+                document.getElementById('tI').value = barcodes[0].rawValue;
+                toggleQRScanner(); // Detener al encontrar
+                return;
+            }
+        }
+    } catch (e) {
+        console.error("Error detectando QR:", e);
+    }
+
+    // Reintentar en el siguiente frame
+    requestAnimationFrame(scanQR);
+}
+
+
+</script>
+</body>
+</html>
