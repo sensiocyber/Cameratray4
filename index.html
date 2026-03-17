@@ -107,9 +107,17 @@ let trayID = "", colNames = {}, namingIdx = 0, lastColName = "", tsCapture = "";
 
 async function init() {
 try {
-const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 1920, height: 1080 } });
-video.srcObject = stream;
-video.onloadedmetadata = () => { canvas.width = 1920; canvas.height = 1080; setStep(1); requestAnimationFrame(draw); };
+    // Pedimos a la cámara la resolución más alta posible cercana a 4000x2000
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: "environment", width: 2880, height: 1620 } 
+    });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => { 
+        canvas.width = 2880;  // <-- CAMBIO AQUÍ
+        canvas.height = 1620; // <-- CAMBIO AQUÍ
+        setStep(1); 
+        requestAnimationFrame(draw); 
+    };
 } catch (e) { alert("Error cámara"); }
 }
 
@@ -126,13 +134,18 @@ return { x: top.x + (bot.x - top.x) * tty, y: top.y + (bot.y - top.y) * tty };
 function draw() {
 ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
 if (appState === 1) {
-ctx.drawImage(video, 0, 0);
-ctx.strokeStyle = "#0f0"; ctx.lineWidth = 6;
-ctx.strokeRect(canvas.width*0.2, canvas.height*0.2, canvas.width*0.6, canvas.height*0.6);
-} else if (appState === 2) {
-ctx.drawImage(capturedImg, 0, 0);
-// Máscara 70% blanco
-ctx.fillStyle = "rgba(255,255,255,0.7)";
+    // Forzamos que el video se dibuje ocupando TODO el ancho y alto del canvas (4000x2000)
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    ctx.strokeStyle = "#0f0"; ctx.lineWidth = 10; // Aumentamos grosor para 4000px
+    ctx.strokeRect(canvas.width*0.2, canvas.height*0.2, canvas.width*0.6, canvas.height*0.6);
+}
+else if (appState === 2) {
+    // CAMBIO: Añadimos canvas.width y canvas.height al final
+    ctx.drawImage(capturedImg, 0, 0, canvas.width, canvas.height);
+    
+    // Máscara 70% blanco
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
 ctx.beginPath(); ctx.rect(0, 0, canvas.width, canvas.height);
 for(let r=0; r<ROWS; r++) {
 for(let c=0; c<COLS; c++) {
@@ -155,97 +168,116 @@ requestAnimationFrame(draw);
 }
 
 function renderFinal() {
-    const mL = 160, mT = 100, mB = 100;
+    // Márgenes y dimensiones del grid
+    const mL = 160, mT = 120, mB = 100;
     const gW = canvas.width - mL - 80, gH = canvas.height - mT - mB;
     const cW = gW / COLS, cH = gH / ROWS;
 
-    // Fondo blanco para el reporte
-    ctx.fillStyle = "#fff"; ctx.fillRect(0,0, canvas.width, canvas.height);
+    // 1. Fondo blanco para el reporte
+    ctx.fillStyle = "#fff"; 
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Encabezado
-    ctx.fillStyle = "#000"; ctx.font = "bold 35px Arial"; ctx.textAlign = "left";
-    ctx.fillText(`ID: ${trayID}`, mL, 60);
-    ctx.font = "20px Arial"; ctx.textAlign = "right";
-    ctx.fillText(`Captura: ${tsCapture}`, canvas.width - 80, 60);
+    // 2. Encabezado
+    ctx.fillStyle = "#000"; 
+    ctx.font = "bold 40px Arial"; 
+    ctx.textAlign = "left";
+    ctx.fillText(`ID: ${trayID}`, mL, 70);
+    
+    ctx.font = "22px Arial"; 
+    ctx.textAlign = "right";
+    ctx.fillText(`Captura: ${tsCapture}`, canvas.width - 80, 70);
 
-    // Creamos un canvas temporal oculto para procesar el "chroma" verde
-    const offCanvas = document.createElement('canvas');
-    const offCtx = offCanvas.getContext('2d');
-    const zoomSize = 80;
-    offCanvas.width = zoomSize;
-    offCanvas.height = zoomSize;
-
+    // 3. Dibujar cada celda
     cellScores.forEach((s, index) => {
-    const x = mL + s.c*cW, y = mT + s.r*cH;
-    const p = getXY((s.c+0.5)/COLS, (s.r+0.5)/ROWS);
-    const zoomSize = 80;
-    const offset = zoomSize / 2;
+        const x = mL + s.c * cW, y = mT + s.r * cH;
+        
+        // Calculamos el centro exacto según la deformación de la rejilla
+        const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
+        
+        const zoomSize = 100; // Tamaño del recorte (ajustado para 2880px)
+        const offset = zoomSize / 2;
 
-    // Dibujo de la planta (Filtrada o Real)
-    if (showFilter && processedCells[index]) {
-        ctx.drawImage(processedCells[index], x + 4, y + 4, cW - 8, cH - 4);
-    } else {
-        ctx.drawImage(capturedImg, p.x - offset, p.y - offset, zoomSize, zoomSize, x + 4, y + 4, cW - 8, cH - 4);
-    }
+        // SEGURIDAD: Evitar que el recorte se salga de la imagen de 2880x1620
+const ajusteX = 0; // Prueba valores entre -200 y 200
+const ajusteY = 0;
 
-        // 2. Procesamos los píxeles (Filtro Verde)
-        const imgData = offCtx.getImageData(0, 0, zoomSize, zoomSize);
-        const d = imgData.data;
-        for (let i = 0; i < d.length; i += 4) {
-            const r = d[i], g = d[i+1], b = d[i+2];
-            // Condición: Si NO es suficientemente verde, lo pintamos de negro
-            // Usamos la misma lógica que en processAutoScoring para consistencia
-            const isGreen = (g > r * 1.1 && g > b * 1.1 && g > 40);
-            
-            if (!isGreen) {
-                d[i] = 0;     // Red
-                d[i+1] = 0;   // Green
-                d[i+2] = 0;   // Blue
-                // d[i+3] es Alpha, lo dejamos en 255 para que sea negro opaco
-            }
-        }
-        offCtx.putImageData(imgData, 0, 0);
+// Quitamos el Math.max/min temporalmente para ver el efecto real
+let sx = p.x - offset + ajusteX;
+let sy = p.y - offset + ajusteY;
 
-        // 3. Dibujamos el resultado procesado en el canvas principal
-        ctx.drawImage(offCanvas, x + 4, y + 4, cW - 8, cH - 4);
+// Dibujamos con el recorte
+ctx.drawImage(capturedImg, 
+    sx, sy, zoomSize, zoomSize, 
+    x + 4, y + 4, cW - 8, cH - 8
+);
 
-        // --- BARRA DE DATOS INFERIOR ---
-        const barH = 22;
+        // Dibujo de la planta (Filtrada o Real)
+        if (showFilter && processedCells[index]) {
+    // !!! AQUÍ USAMOS LA IMAGEN PRE-PROCESADA CON EL FILTRO NEGRO !!!
+    // processedCells[index] es el canvas temporal que creamos en preProcessGreenFilter
+    ctx.drawImage(processedCells[index], x + 2, y + 2, cW - 4, cH - 4);
+} else {
+    // Recorte directo de la imagen original CENTRADO (sin filtro)
+    ctx.drawImage(capturedImg, 
+        sx, sy, zoomSize, zoomSize, 
+        x + 2, y + 2, cW - 4, cH - 4
+    );
+}
+
+
+        // --- BARRA DE DATOS Y SCORE ---
         const color = getScoreColor(s.score);
         ctx.fillStyle = color;
-        ctx.font = "bold 18px Arial"; 
+        ctx.font = "bold 24px Arial"; 
         ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(s.score, x + 10, y + cH - barH/2 - 4);
+        ctx.textBaseline = "bottom";
+        ctx.fillText(s.score, x + 10, y + cH - 10);
 
         if(appState >= 6 && colNames[LETTERS[s.c]]) {
-            ctx.fillStyle = "#333"; // Cambiado a oscuro para leer sobre fondo blanco del reporte
-            ctx.font = "15px Arial";
+            ctx.fillStyle = "#666";
+            ctx.font = "14px Arial";
             ctx.textAlign = "right";
             let name = colNames[LETTERS[s.c]];
-            if(name.length > 8) name = name.substring(0,7) + "..";
-            ctx.fillText(name, x + cW - 10, y + cH - barH/2 - 4);
+            if(name.length > 10) name = name.substring(0,9) + "..";
+            ctx.fillText(name, x + cW - 10, y + cH - 10);
         }
     });
 
-    // --- NOMENCLATURA DE EJES ---
+    // 4. Nomenclatura de ejes
     ctx.fillStyle = "#333";
-    ctx.font = "bold 20px Arial";
+    ctx.font = "bold 22px Arial";
     ctx.textAlign = "center";
     for(let c=0; c<COLS; c++) ctx.fillText(LETTERS[c], mL + (c+0.5)*cW, canvas.height - 40);
+    
     ctx.textAlign = "right";
-    for(let r=0; r<ROWS; r++) ctx.fillText(r+1, mL - 25, mT + (r+0.5)*cH + 7);
+    for(let r=0; r<ROWS; r++) ctx.fillText(r+1, mL - 30, mT + (r+0.5)*cH + 10);
 }
 async function takePhoto() {
-const tmp = document.createElement('canvas'); tmp.width = 1920; tmp.height = 1080;
-tmp.getContext('2d').drawImage(video, 0, 0);
-capturedImg = await createImageBitmap(tmp);
-tsCapture = new Date().toLocaleString();
-points = [{x:400, y:250}, {x:1520, y:250}, {x:1520, y:830}, {x:400, y:830}];
-pCenter = { tx: 0.5, ty: 0.5 };
-setStep(2);
-}
+    const targetW = 2880;
+    const targetH = 1620;
 
+    const tmp = document.createElement('canvas'); 
+    tmp.width = targetW;
+    tmp.height = targetH;
+    
+    const tCtx = tmp.getContext('2d');
+    // Dibujamos el video estirado a la resolución nativa de trabajo
+    tCtx.drawImage(video, 0, 0, targetW, targetH);
+    
+    capturedImg = await createImageBitmap(tmp);
+    tsCapture = new Date().toLocaleString();
+    
+    // REJILLA BASADA EN PÍXELES REALES (No en el tamaño visual del canvas)
+    points = [
+        { x: targetW * 0.2, y: targetH * 0.2 }, // A (Top-Left)
+        { x: targetW * 0.8, y: targetH * 0.2 }, // B (Top-Right)
+        { x: targetW * 0.8, y: targetH * 0.8 }, // C (Bottom-Right)
+        { x: targetW * 0.2, y: targetH * 0.8 }  // D (Bottom-Left)
+    ];
+
+    pCenter = { tx: 0.5, ty: 0.5 };
+    setStep(2);
+}
 function getScoreColor(score) {
 // 1-3: Tonos Rojos/Naranjas | 4-7: Amarillos/Ocres | 8-10: Verdes
 const colors = [
@@ -257,45 +289,64 @@ return colors[score - 1] || "#fff";
 
 
 function preProcessGreenFilter() {
-    processedCells = [];
-    const zoomSize = 80;
-    const offCanvas = document.createElement('canvas');
-    const offCtx = offCanvas.getContext('2d');
-    offCanvas.width = zoomSize;
-    offCanvas.height = zoomSize;
+    processedCells = []; // Vaciamos la caché anterior
+    const zoomSize = 100; // !!! IMPORTANTE: Debe ser igual que en renderFinal !!!
+    const offset = zoomSize / 2;
 
     cellScores.forEach(s => {
+        // 1. Calculamos el centro exacto de la celda (misma lógica que renderFinal)
         const p = getXY((s.c + 0.5) / COLS, (s.r + 0.5) / ROWS);
-        const offset = zoomSize / 2;
+        
+        // 2. Definimos las coordenadas de recorte seguras (misma lógica que renderFinal)
+        let sx = Math.max(0, Math.min(2880 - zoomSize, p.x - offset));
+        let sy = Math.max(0, Math.min(1620 - zoomSize, p.y - offset));
 
-        offCtx.clearRect(0, 0, zoomSize, zoomSize);
-        offCtx.drawImage(capturedImg, p.x - offset, p.y - offset, zoomSize, zoomSize, 0, 0, zoomSize, zoomSize);
+        // 3. Creamos un canvas temporal para este recorte
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = zoomSize;
+        offCanvas.height = zoomSize;
+        const offCtx = offCanvas.getContext('2d');
 
+        // 4. Dibujamos el recorte CENTRADO de la imagen original en el canvas temporal
+        offCtx.drawImage(capturedImg, sx, sy, zoomSize, zoomSize, 0, 0, zoomSize, zoomSize);
+
+        // 5. OBTENEMOS LOS PÍXELES PARA APLICAR EL FILTRO
         const imgData = offCtx.getImageData(0, 0, zoomSize, zoomSize);
-        const d = imgData.data;
+        const d = imgData.data; // Array de píxeles [R, G, B, A, R, G, B, A, ...]
+
+        // 6. BUCLE DE PROCESAMIENTO (El "chroma key" verde)
         for (let i = 0; i < d.length; i += 4) {
-            const r = d[i], g = d[i + 1], b = d[i + 2];
-            if (!(g > r * 1.1 && g > b * 1.1 && g > 40)) {
-                d[i] = d[i + 1] = d[i + 2] = 0; // Negro
+            const r = d[i];     // Rojo
+            const g = d[i + 1]; // Verde
+            const b = d[i + 2]; // Azul
+            // d[i + 3] es el Alpha (transparencia), no lo tocamos
+
+            // Definimos qué es "verde" (misma lógica que processAutoScoring)
+            const isGreen = (g > r * 1.1 && g > b * 1.1 && g > 40);
+
+            // Si NO es verde, lo pintamos de negro opaco
+            if (!isGreen) {
+                d[i] = 0;     // R -> 0
+                d[i + 1] = 0; // G -> 0
+                d[i + 2] = 0; // B -> 0
             }
         }
         
-        const cellImg = document.createElement('canvas');
-        cellImg.width = zoomSize;
-        cellImg.height = zoomSize;
-        cellImg.getContext('2d').putImageData(imgData, 0, 0);
-        processedCells.push(cellImg);
+        // 7. Volvemos a poner los píxeles modificados en el canvas temporal
+        offCtx.putImageData(imgData, 0, 0);
+
+        // 8. Guardamos este canvas procesado en el array de caché
+        processedCells.push(offCanvas);
     });
 }
 
 
 function processAutoScoring() {
-cellScores = [];
-// Usamos un canvas auxiliar para leer los píxeles de la imagen capturada
-const t = document.createElement('canvas'); 
-t.width = 1920; t.height = 1080;
-const tc = t.getContext('2d'); 
-tc.drawImage(capturedImg, 0, 0);
+    cellScores = [];
+    const t = document.createElement('canvas'); 
+    t.width = 2880; t.height = 1620; // <-- CAMBIO AQUÍ
+    const tc = t.getContext('2d'); 
+    tc.drawImage(capturedImg, 0, 0);
 
 for(let r=0; r<ROWS; r++) {
 for(let c=0; c<COLS; c++) {
@@ -421,8 +472,8 @@ canvas.addEventListener('pointerdown', e => {
     const mx = (e.clientX - rect.left) * scaleX;
     const my = (e.clientY - rect.top) * scaleY;
 
-    const gridW = (1920 - 240);
-    const gridH = (1080 - 180);
+    const gridW = (2880 - 240);
+    const gridH = (1620 - 180);
     const c = Math.floor((mx - 160) / (gridW / COLS));
     const rIdx = Math.floor((my - 100) / (gridH / ROWS));
     
@@ -442,12 +493,12 @@ canvas.addEventListener('pointermove', e => {
     const my = (e.clientY - rect.top) * scaleY;
     
     if(draggingIdx === 4) {
-        pCenter.tx = Math.max(0.05, Math.min(0.95, mx / 1920));
-        pCenter.ty = Math.max(0.05, Math.min(0.95, my / 1080));
+        pCenter.tx = Math.max(0.05, Math.min(0.95, mx / 2880));
+        pCenter.ty = Math.max(0.05, Math.min(0.95, my / 1620));
     } else { 
         // Limitamos para que no se salgan del canvas
-        points[draggingIdx].x = Math.max(0, Math.min(1920, mx)); 
-        points[draggingIdx].y = Math.max(0, Math.min(1080, my)); 
+        points[draggingIdx].x = Math.max(0, Math.min(2880, mx)); 
+        points[draggingIdx].y = Math.max(0, Math.min(1620, my)); 
     }
 });
 canvas.addEventListener('pointerup', () => draggingIdx = null);
@@ -554,18 +605,29 @@ async function handleFileSelect(event) {
     reader.onload = function(e) {
         const img = new Image();
         img.onload = async function() {
-            // Creamos un canvas temporal para asegurar que la imagen tenga el tamaño esperado (1920x1080)
+            const targetW = 2880;
+            const targetH = 1620;
+
             const tmp = document.createElement('canvas');
-            tmp.width = 1920;
-            tmp.height = 1080;
+            tmp.width = targetW;
+            tmp.height = targetH;
             const tCtx = tmp.getContext('2d');
             
-            // Dibujamos la imagen cargada ajustándola al lienzo
-            tCtx.drawImage(img, 0, 0, 1920, 1080);
+            // Lógica de llenado: Estiramos la imagen para que ocupe los 2880x1620
+            // Esto asegura que las coordenadas de los puntos coincidan con el recorte final
+            tCtx.drawImage(img, 0, 0, targetW, targetH);
             
             capturedImg = await createImageBitmap(tmp);
             tsCapture = new Date().toLocaleString() + " (Archivo)";
-            points = [{x:400, y:250}, {x:1520, y:250}, {x:1520, y:830}, {x:400, y:830}];
+            
+            // REJILLA BASADA EN PÍXELES REALES
+            points = [
+                { x: targetW * 0.2, y: targetH * 0.2 }, 
+                { x: targetW * 0.8, y: targetH * 0.2 }, 
+                { x: targetW * 0.8, y: targetH * 0.8 }, 
+                { x: targetW * 0.2, y: targetH * 0.8 }
+            ];
+            
             pCenter = { tx: 0.5, ty: 0.5 };
             setStep(2);
         };
@@ -573,7 +635,6 @@ async function handleFileSelect(event) {
     };
     reader.readAsDataURL(file);
 }
-
 
 async function toggleQRScanner() {
     const container = document.getElementById('qr-preview-container');
