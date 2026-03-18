@@ -1,6 +1,8 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Analizador Agrícola V9.2 - Control Total</title>
@@ -388,7 +390,7 @@ if(step===5) {
         <div style="width:100%; display:flex; flex-direction:column; align-items:center; gap:10px;">
             <p style="color:#aaa; font-size:12px; margin:0;">IDENTIFICAR BANDEJA</p>
             
-            <div id="qr-preview-container" style="display:none; width:180px; height:140px; border:2px solid #2ecc71; border-radius:8px; overflow:hidden; position:relative; background:#000;">
+            <div id="qr-preview-container" style="display:none; width:160px; height:90px; border:2px solid #2ecc71; border-radius:8px; overflow:hidden; position:relative; background:#000;">
                 <canvas id="qr-canvas" style="width:100%; height:100%; object-fit:cover;"></canvas>
                 <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:60%; height:60%; border:1px solid rgba(46, 204, 113, 0.5); pointer-events:none;"></div>
             </div>
@@ -671,28 +673,41 @@ async function scanQR() {
     const qrCanvas = document.getElementById('qr-canvas');
     if (!qrCanvas) return;
     const qctx = qrCanvas.getContext('2d');
+
+    // 1. Usamos una resolución intermedia para no saturar pero mantener nitidez
+    qrCanvas.width = 720; 
+    qrCanvas.height = 480;
     
-    // Dibujamos lo que ve la cámara principal en el pequeño canvas de la derecha
-    qrCanvas.width = video.videoWidth / 4;
-    qrCanvas.height = video.videoHeight / 4;
+    // Dibujamos el centro de la cámara (donde suele estar el QR)
     qctx.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
 
     try {
-        // Usamos BarcodeDetector si está disponible (Chrome/Android)
-        if ('BarcodeDetector' in window) {
-            const detector = new BarcodeDetector({ formats: ['qr_code'] });
-            const barcodes = await detector.detect(qrCanvas);
-            if (barcodes.length > 0) {
-                document.getElementById('tI').value = barcodes[0].rawValue;
-                toggleQRScanner(); // Detener al encontrar
-                return;
-            }
+        const imageData = qctx.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
+        
+        // Intentamos leer con jsQR (Librería universal)
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: "dontInvert",
+        });
+
+        if (code) {
+            console.log("QR Detectado:", code.data);
+            document.getElementById('tI').value = code.data;
+            trayID = code.data; // Actualizamos la variable global
+            
+            // Feedback visual: poner borde verde brillante un segundo
+            document.getElementById('qr-preview-container').style.borderColor = "#00ff00";
+            
+            setTimeout(() => {
+                toggleQRScanner(); 
+                updateVisualCache();
+            }, 500);
+            return;
         }
     } catch (e) {
         console.error("Error detectando QR:", e);
     }
 
-    // Reintentar en el siguiente frame
+    // Si no encontró nada, sigue intentando
     requestAnimationFrame(scanQR);
 }
 
